@@ -1,0 +1,155 @@
+#!/usr/bin/env python
+
+from urlparse import urlparse
+from urllib import urlencode
+import httplib
+import logging, re, os, json
+
+logger = logging.getLogger(__name__)
+
+API_KEY = 'DJANGO_API_KEY'
+
+def _get_connection(url):
+    o = urlparse(url)
+
+    if o.scheme == 'https':
+        return httplib.HTTPSConnection(o.hostname, o.port)
+    elif o.scheme == 'http':
+        return httplib.HTTPConnection(o.hostname, o.port)
+    else:
+        raise IOError("Unknown scheme: %s" % o.scheme)
+
+def _get_response(conn, method, url, body=None, headers={}, expected=200):
+    conn.request(method, url, body, headers)
+    resp = conn.getresponse()
+
+    if resp.status == 400:
+        data = json.loads(resp.read())
+        logger.error(data)
+        raise IOError(data['errors']['title'])
+
+    if resp.status != expected:
+        raise IOError("%d %s" % (resp.status, resp.reason))
+
+    return resp
+
+def _get_cookie(cookies, name):
+
+    i = iter(re.split("[,;]?\s?([\w]+)=", cookies))
+
+    i.next()  # skip empty
+    while True:
+        if i.next() == name: return i.next()
+        i.next()
+
+def _get_api_key(args):
+    if args.api_key: return args.api_key
+
+    if API_KEY in os.environ: return os.environ[API_KEY]
+
+    raise Exception("No API key given")
+
+def _api_headers(args, extra={}):
+    csrf, session = _get_api_key(args).split(':')
+
+    headers = {'Cookie': "csrftoken=%s; sessionid=%s;" % (csrf, session),
+               'X-CSRFToken': csrf,
+               'Content-type': 'application/%s' % args.output}
+    headers.update(extra)
+
+    return headers
+
+def login(conn, args):
+    '''
+    Get a session id from the given server
+    '''
+
+    if args.password is None:
+        import getpass
+        password = getpass.getpass("Password: ")
+    else:
+        password = args.password
+
+    # need a CSRF token
+    resp = _get_response(conn, "GET", "/login?output=json")
+
+    csrf = _get_cookie(resp.getheader('set-cookie'), 'csrftoken')
+    logger.info("CSRF_TOKEN: %s" % csrf)
+
+    data = urlencode({'username': args.user,
+                      'password': password,
+                      'csrfmiddlewaretoken': csrf})
+    headers = {'content-type': 'application/x-www-form-urlencoded',
+               'Cookie': "csrftoken=%s;" % csrf}
+
+    resp = _get_response(conn, "POST", "/login?output=json", data, headers, 302)
+
+    session = _get_cookie(resp.getheader('set-cookie'), 'sessionid')
+    logger.info("SESSION_ID: %s" % session)
+
+    logger.info("Successfully logged on")
+
+    api_key = "%s:%s" % (csrf, session)
+    return api_key
+
+def get(conn, args):
+
+    params = {'api': args.output}
+
+    params.update(dict([ x.split('=', 2) for x in args.params ]))
+
+    uri = "/%s?%s" % (args.resource, urlencode(params))
+    logger.info("Requesting %s" % uri)
+    resp = _get_response(conn, "GET", uri, headers=_api_headers(args))
+
+    return resp.read()
+
+def post(conn, args):
+    get_params = {'api': args.output}
+
+    post_params = dict([ x.split('=', 2) for x in args.params ])
+    body = json.dumps(post_params)
+
+
+    uri = "/%s?%s" % (args.resource, urlencode(get_params))
+    logger.info("Requesting %s" % uri)
+    resp = _get_response(conn, "POST", uri, body, headers=_api_headers(args))
+
+    return resp.read()
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Connect to modbox API")
+    parser.add_argument('--dest', '-d', default='http://localhost:8000', help="Destination url [http://localhost:8000]")
+    parser.add_argument('--log_level', '-l', default='warning', help="Logging level")
+    parser.add_argument('--api_key', '-a', help="API key (uses %s from environment if not set)" % API_KEY)
+    parser.add_argument('--output', '-o', default='json', help="Outputter")
+    subparsers = parser.add_subparsers()
+
+    parser_login = subparsers.add_parser('login')
+    parser_login.add_argument('--user', '-u', default='admin', help="User to authenticate as.")
+    parser_login.add_argument('--password', '-p', help="Password (will prompt if not present")
+    parser_login.set_defaults(func=login)
+
+    parser_get = subparsers.add_parser('get')
+    parser_get.add_argument('resource', help="URI to get")
+    parser_get.add_argument('params', nargs="*")
+    parser_get.set_defaults(func=get)
+
+    parser_post = subparsers.add_parser('post')
+    parser_post.add_argument('resource', help="URI to get")
+    parser_post.add_argument('params', nargs="*")
+    parser_post.set_defaults(func=post)
+
+    args = parser.parse_args()
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
+
+    conn = _get_connection(args.dest)
+
+    print args.func(conn, args)
+
+
+if __name__ == '__main__':
+    main()
