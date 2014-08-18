@@ -5,5 +5,5 @@ setup(name='Django-API',
       description='Quickly add a REST api to your Django project',
       author='Tris Forster',
       author_email='tris@tfconsulting.com.au',
-      packages=['django-api'],
+      packages=['django_api'],
       scripts=['scripts/django-api'])
