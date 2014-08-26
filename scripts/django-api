@@ -3,33 +3,44 @@
 from urlparse import urlparse
 from urllib import urlencode
 import httplib
-import logging, re, os, json
+import logging, re, os, json, sys
 
 logger = logging.getLogger(__name__)
 
 API_KEY = 'DJANGO_API_KEY'
 
+class APIError(Exception): pass
+
 def _get_connection(url):
     o = urlparse(url)
 
     if o.scheme == 'https':
+        # todo: cert checking
         return httplib.HTTPSConnection(o.hostname, o.port)
     elif o.scheme == 'http':
         return httplib.HTTPConnection(o.hostname, o.port)
     else:
         raise IOError("Unknown scheme: %s" % o.scheme)
 
-def _get_response(conn, method, url, body=None, headers={}, expected=200):
+def _get_response(conn, method, url, body=None, headers={}, status=None, content_type=None):
+    logger.debug("%s: %s" % (method, url))
+    logger.info("Headers: %s" % headers)
     conn.request(method, url, body, headers)
     resp = conn.getresponse()
+    logger.debug("STATUS: %d" % resp.status)
 
-    if resp.status == 400:
-        data = json.loads(resp.read())
-        logger.error(data)
-        raise IOError(data['errors']['title'])
+    if status is not None and resp.status != status:
+        if logger.isEnabledFor(logging.DEBUG):
+            sys.stderr.write(resp.read())
+        raise APIError("%d %s" % (resp.status, resp.reason))
 
-    if resp.status != expected:
-        raise IOError("%d %s" % (resp.status, resp.reason))
+    if content_type is not None:
+        ct = resp.getheader('Content-type', 'unknown').split(';')[0]
+        logger.debug("Content-type: %s" % ct)
+        if ct != content_type:
+            if logger.isEnabledFor(logging.DEBUG):
+                sys.stderr.write(resp.read())
+            raise APIError("Expected %s, got %s" % (content_type, ct))
 
     return resp
 
@@ -53,8 +64,7 @@ def _api_headers(args, extra={}):
     csrf, session = _get_api_key(args).split(':')
 
     headers = {'Cookie': "csrftoken=%s; sessionid=%s;" % (csrf, session),
-               'X-CSRFToken': csrf,
-               'Content-type': 'application/%s' % args.output}
+               'X-CSRFToken': csrf}
     headers.update(extra)
 
     return headers
@@ -71,7 +81,7 @@ def login(conn, args):
         password = args.password
 
     # need a CSRF token
-    resp = _get_response(conn, "GET", "/login?output=json")
+    resp = _get_response(conn, "HEAD", "/login?output=json")
 
     csrf = _get_cookie(resp.getheader('set-cookie'), 'csrftoken')
     logger.info("CSRF_TOKEN: %s" % csrf)
@@ -82,7 +92,13 @@ def login(conn, args):
     headers = {'content-type': 'application/x-www-form-urlencoded',
                'Cookie': "csrftoken=%s;" % csrf}
 
-    resp = _get_response(conn, "POST", "/login?output=json", data, headers, 302)
+    resp = _get_response(conn, "POST", "/login?output=json", data, headers)
+
+    if resp.status != 302:
+        if resp.status == 200:
+            raise APIError("Bad username or password")
+        else:
+            raise APIError("%d %s" % (resp.status, resp.message))
 
     session = _get_cookie(resp.getheader('set-cookie'), 'sessionid')
     logger.info("SESSION_ID: %s" % session)
@@ -99,8 +115,12 @@ def get(conn, args):
     params.update(dict([ x.split('=', 2) for x in args.params ]))
 
     uri = "/%s?%s" % (args.resource, urlencode(params))
-    logger.info("Requesting %s" % uri)
-    resp = _get_response(conn, "GET", uri, headers=_api_headers(args))
+    resp = _get_response(conn,
+                         "GET",
+                         uri,
+                         headers=_api_headers(args, {"Accept": "application/json"}),
+                         status=200,
+                         content_type="application/%s" % args.output)
 
     return resp.read()
 
@@ -113,7 +133,13 @@ def post(conn, args):
 
     uri = "/%s?%s" % (args.resource, urlencode(get_params))
     logger.info("Requesting %s" % uri)
-    resp = _get_response(conn, "POST", uri, body, headers=_api_headers(args))
+    resp = _get_response(conn,
+                         "POST",
+                         uri,
+                         body,
+                         headers=_api_headers(args, {"Content-type": "application/json", "Accept": "application/json"}),
+                         status=200,
+                         content_type="application/%s" % args.output)
 
     return resp.read()
 
@@ -144,12 +170,18 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
+    log_level = getattr(logging, args.log_level.upper(), logging.WARNING)
+    logging.basicConfig(level=log_level)
 
     conn = _get_connection(args.dest)
 
-    print args.func(conn, args)
-
+    try:
+        print args.func(conn, args)
+    except APIError, e:
+        if log_level <= logging.INFO:
+            import traceback
+            traceback.print_exc()
+        logger.error(str(e))
 
 if __name__ == '__main__':
     main()
