@@ -29,13 +29,14 @@ def _get_response(conn, method, url, body=None, headers={}, status=None, content
     resp = conn.getresponse()
     logger.debug("STATUS: %d" % resp.status)
 
+    ct = resp.getheader('Content-type', 'unknown').split(';')[0]
+
     if status is not None and resp.status != status:
-        if logger.isEnabledFor(logging.DEBUG):
+        if ct == content_type or logger.isEnabledFor(logging.DEBUG):
             sys.stderr.write(resp.read())
         raise APIError("%d %s" % (resp.status, resp.reason))
 
     if content_type is not None:
-        ct = resp.getheader('Content-type', 'unknown').split(';')[0]
         logger.debug("Content-type: %s" % ct)
         if ct != content_type:
             if logger.isEnabledFor(logging.DEBUG):

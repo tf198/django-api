@@ -26,7 +26,7 @@ class BasicAPI(object):
         return HttpResponse(self.encode(result), content_type=self.get_content_type())
 
     def failure(self, e):
-        data = {'errors': {'title': str(e)}}
+        data = {'errors': {'description': str(e)}}
         return HttpResponse(self.encode(data), content_type=self.get_content_type(), status=400)
 
 class JSONMixin(object):
@@ -37,7 +37,7 @@ class JSONMixin(object):
         return json.loads(body)
 
     def encode(self, data):
-        return json.dumps(data)
+        return json.dumps(data, indent=1)
 
 class YAMLMixin(object):
 

@@ -7,7 +7,7 @@ from django.views.generic import base, edit
 from django.forms.models import model_to_dict
 from django.http import Http404
 
-import django_api.schemes.basic
+from django_api import schemes
 
 import logging
 logger = logging.getLogger(__name__)
@@ -16,8 +16,8 @@ class APIResponseMixin(base.TemplateResponseMixin):
 
     api = None
 
-    api_schemes = {'json': django_api.schemes.basic.JSONAPI,
-                   'yaml': django_api.schemes.basic.YAMLAPI}
+    api_schemes = {'json': schemes.basic.JSONAPI,
+                   'yaml': schemes.basic.YAMLAPI}
 
     def get_api_scheme_name(self):
 
@@ -40,16 +40,9 @@ class APIResponseMixin(base.TemplateResponseMixin):
 
     def get_api_data(self, context):
         '''
-        Does a simple inspection of the context to handle common cases.
         Subclasses should override this method to control precisely what is returned.
         '''
-        if 'object' in context:
-            return model_to_dict(context['object'], exclude='id')
-
-        if 'object_list' in context:
-            return list(context['object_list'].values())
-
-        return context
+        raise NotImplementedError("Need to implement get_api_data()")
 
     def render_to_response(self, context):
 
@@ -66,9 +59,13 @@ class APIResponseMixin(base.TemplateResponseMixin):
         try:
             return scheme.success(method(context))
         except Exception, e:
+            logger.exception("Failed to render api data")
             return scheme.failure(e)
 
 class APIFormMixin(APIResponseMixin, edit.FormMixin):
+
+    def get_api_data(self, context):
+        return {}
 
     def get_default_api_values(self):
 
@@ -92,11 +89,14 @@ class APIFormMixin(APIResponseMixin, edit.FormMixin):
             self.api_scheme = self.get_api_scheme(self.api_scheme_name)
 
             data = {}
-            data.update(self.get_default_api_values())
 
             if not self.api_scheme.can_parse(self.request.META['CONTENT_TYPE']):
                 raise Http404("Unable to parse POST body: %s" % self.request.META['CONTENT_TYPE'])
-            data.update(self.api_scheme.parse_body(self.request.body))
+
+            post_data = self.api_scheme.parse_body(self.request.body)
+            if post_data:
+                data.update(self.get_default_api_values())
+                data.update(post_data)
 
             logger.info(data)
 
